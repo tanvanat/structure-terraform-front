@@ -1,0 +1,192 @@
+terraform {
+  required_providers {
+    openstack = {
+        source  = "terraform-provider-openstack/openstack"
+        version = "~> 3.0.0"
+    }
+  }
+}
+
+provider "openstack" {
+    user_name           = "kornkamol@nipa.cloud"
+    tenant_name         = "terraform_test"
+    domain_name         = "nipacloud"
+    password            = "Bell_09022547"
+    auth_url            = "https://stg.thaiopenstack.com:5000"
+    region              = "NCP-TH"
+}
+
+# สร้าง Network
+# resource "openstack_networking_network_v2" "network" {
+#     name = "network-lunlun"
+#     external = false
+# }
+
+# สร้าง Subnet
+# resource "openstack_networking_subnet_v2" "subnet" {
+#     name            = "subnet-lunlun"
+#     network_id      = openstack_networking_network_v2.network.id
+#     cidr            = "10.10.10.0/24"   # กำหนด CIDR ของ subnet
+#     gateway_ip      = "10.10.10.1"
+#     dns_nameservers = ["8.8.8.8"]
+# }
+
+# สร้าง secerity group
+# resource "openstack_networking_secgroup_v2" "secgroup_1" {
+#   name        = "secgroup-lunlun"
+#   description = "Security group for k0s cluster"
+# }
+
+# Rule สำหรับอนุญาตการเข้าถึง SSH จากทุก IP
+# resource "openstack_networking_secgroup_rule_v2" "secgroup_rule_1" {
+#   direction         = "ingress"
+#   ethertype         = "IPv4"
+#   protocol          = "tcp"
+#   port_range_min    = 22
+#   port_range_max    = 22
+#   remote_ip_prefix  = "0.0.0.0/0"   # เปิดพอร์ต SSH สำหรับทุก IP
+#   security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+# }
+
+# Rule สำหรับ Kubernetes API
+# resource "openstack_networking_secgroup_rule_v2" "secgroup_rule_2" {
+#   direction         = "ingress"
+#   ethertype         = "IPv4"
+#   protocol          = "tcp"
+#   port_range_min    = 6443
+#   port_range_max    = 6443
+#   remote_ip_prefix  = "0.0.0.0/0"   # เปิดพอร์ต SSH สำหรับทุก IP
+#   security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+# }
+
+# Floating IP สำหรับ Worker
+# resource "openstack_networking_floatingip_v2" "floatip_worker" {
+#   pool       = "Standard_Public_IP_Pool_NON" 
+#   subnet_ids = "fadda74c-a9de-4bb3-9682-0f5e345a5214"
+}
+# resource "openstack_networking_floatingip_associate_v2" "fip_worker" {
+#   floating_ip = openstack_networking_floatingip_v2.floatip_worker.id
+#   port_id     = openstack_compute_instance_v2.worker[0].network.0.port
+# }
+
+# สร้าง Keypair
+resource "openstack_compute_keypair_v2" "keypair" {
+    name = "keypair_lunlun"
+    public_key = file("C:/Users/nubel/.ssh/id_rsa.pub")
+}
+
+# Floating IP สำหรับ Control Plane
+resource "openstack_networking_floatingip_v2" "floatip_control" {
+  pool       = "Standard_Public_IP_Pool_NON"  
+}
+resource "openstack_networking_port_v2" "port_control" {
+    name        = "port_lunlun"
+    network_id  = "a90b7fb5-d5b3-4c11-85e5-8570aa36da3f"
+#     fixed_ip {
+#         subnet_id = "fadda74c-a9de-4bb3-9682-0f5e345a5214"
+#   }
+}
+resource "openstack_networking_floatingip_associate_v2" "fip_control" {
+    floating_ip = openstack_networking_floatingip_v2.floatip_control.address
+    port_id     = openstack_networking_port_v2.port_control.id
+}
+
+# Floating IP สำหรับ Worker
+resource "openstack_networking_floatingip_v2" "floatip_worker" {
+  pool       = "Standard_Public_IP_Pool_NON"  
+}
+resource "openstack_networking_port_v2" "port_worker" {
+    name        = "port_lunlun"
+    network_id  = "a90b7fb5-d5b3-4c11-85e5-8570aa36da3f"
+#     fixed_ip {
+#         subnet_id = "fadda74c-a9de-4bb3-9682-0f5e345a5214"
+#   }
+}
+resource "openstack_networking_floatingip_associate_v2" "fip_worker" {
+    floating_ip = openstack_networking_floatingip_v2.floatip_worker.address
+    port_id     = openstack_networking_port_v2.port_worker.id
+}
+
+# สร้าง Control Plane VMs
+resource "openstack_compute_instance_v2" "control_plane" {
+    count             = 1
+    name              = "control-plane-${count.index}"
+    image_name        = "ubuntu-20-v220723"
+    flavor_name       = "csa.large.v2"
+    key_pair          = "keypair_lunlun"
+    security_groups   = ["default","SSH","ALL"]
+    availability_zone = "NCP-NON"
+
+
+    network {
+        # name =  "network_lunlun"
+        port = openstack_networking_port_v2.port_control.id
+    }
+
+    # volume
+    block_device {
+        uuid                  = "de6ed19f-54d3-4786-8280-b3940a900623"
+        source_type           = "image"
+        boot_index            = 0
+        destination_type      = "volume"
+        volume_size           = 20
+        delete_on_termination = false
+    }
+
+    # provisioner "remote-exec" {
+    #     inline = [
+    #         "curl -sSLf https://get.k0s.sh | sudo sh",   # ติดตั้ง k0s
+    #         "sudo mv k0s /usr/local/bin/",               # ย้าย k0s ไปที่ path
+    #         "sudo k0s controller"                        # เริ่มต้น k0s controller
+    #     ]
+
+    #     connection {
+    #         type        = "ssh"
+    #         host        = openstack_networking_floatingip_v2.floatip_control.address  # ใช้ floating IP ที่ได้จาก OpenStack
+    #         user        = "ubuntu"
+    #         private_key = file("C:/Users/nubel/.ssh/id_ed25519")
+    #     }
+    # }
+}
+
+# สร้าง Worker VMs
+resource "openstack_compute_instance_v2" "worker" {
+    count             = 1
+    name              = "worker-${count.index}"
+    image_name        = "ubuntu-20-v220723"
+    flavor_name       = "csa.large.v2"
+    key_pair          = "keypair_lunlun"
+    security_groups   = ["default","SSH","ALL"]
+    availability_zone = "NCP-NON"
+
+    network {
+        # name =  "network_lunlun"
+        port = openstack_networking_port_v2.port_worker.id
+    }
+
+    # volume
+    block_device {
+        uuid                  = "de6ed19f-54d3-4786-8280-b3940a900623"
+        source_type           = "image"
+        boot_index            = 0
+        destination_type      = "volume"
+        volume_size           = 20
+        delete_on_termination = false
+    }
+
+    # provisioner "remote-exec" {
+    #     inline = [
+    #         "curl -sSLf https://get.k0s.sh | sudo sh",   # ติดตั้ง k0s
+    #         "sudo mv k0s /usr/local/bin/",               # ย้าย k0s ไปที่ path
+    #         "sudo k0s worker --token-file /etc/k0s/token" # เชื่อมต่อ worker กับ control plane
+    #     ]
+
+    #     connection {
+    #         type        = "ssh"
+    #         host        = openstack_networking_floatingip_v2.floatip_worker.address  # ใช้ floating IP ที่ได้จาก OpenStack
+    #         user        = "ubuntu"
+    #         private_key = file("C:/Users/nubel/.ssh/id_ed25519")
+    #     }
+    # }
+}
+ 
