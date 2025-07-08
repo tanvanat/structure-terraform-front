@@ -8,10 +8,9 @@ variable "os_username" {
 }
 
 variable "os_password" {
-  description = "OpenStack password (HIGHLY RECOMMENDED to use environment variables or terraform.tfvars)"
+  description = "OpenStack password"
   type        = string
-  sensitive   = true # Mark as sensitive to prevent logging
-  default     = "Front1234460!" # **สำหรับทดสอบเท่านั้น!** ควรลบ default ออกใน Production
+  sensitive   = true
 }
 
 variable "os_tenant_name" {
