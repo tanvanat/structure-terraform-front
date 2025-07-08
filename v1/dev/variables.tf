@@ -171,3 +171,9 @@ variable "private_key_path" {
   type        = string
   default     = "~/.ssh/id_rsa" # <--- **เปลี่ยน Path นี้ให้ถูกต้องบน Linux VM (instance-1)**
 }
+
+variable "token_for_github" {
+  description = "GitHub personal access token"
+  type        = string
+  sensitive   = true
+}
