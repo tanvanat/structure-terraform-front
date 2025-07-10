@@ -1,0 +1,1 @@
+ทดลองการสร้างinstanceจากterraformเอง
