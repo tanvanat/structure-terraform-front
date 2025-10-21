@@ -12,10 +12,5 @@ terraform {
 # กำหนดค่า Provider สำหรับ OpenStack
 # ควรใช้ Environment Variables หรือ terraform.tfvars เพื่อความปลอดภัย
 provider "openstack" {
-  auth_url    = var.os_auth_url
-  region      = var.os_region
-  user_name   = var.os_username
-  password    = var.os_password # ใช้ตัวแปร
-  tenant_name = var.os_tenant_name
-  domain_name = var.os_domain_name
+
 }
