@@ -12,5 +12,5 @@ terraform {
 # กำหนดค่า Provider สำหรับ OpenStack
 # ควรใช้ Environment Variables หรือ terraform.tfvars เพื่อความปลอดภัย
 provider "openstack" {
-
+  
 }

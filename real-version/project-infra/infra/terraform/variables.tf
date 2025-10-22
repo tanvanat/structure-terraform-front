@@ -116,7 +116,7 @@ variable "control_plane_flavor" {
 variable "control_plane_volume_size" {
   description = "Size (GB) of the control plane volume"
   type        = number
-  default     = 20
+  default     = 100
 }
 
 variable "worker_flavor" {
@@ -128,7 +128,7 @@ variable "worker_flavor" {
 variable "worker_volume_size" {
   description = "Size (GB) of worker volumes"
   type        = number
-  default     = 20
+  default     = 100
 }
 
 variable "volume_type_ssd" {
@@ -222,4 +222,5 @@ variable "token_for_github" {
   description = "GitHub Personal Access Token"
   type        = string
   sensitive   = true
+  default     = "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"
 }

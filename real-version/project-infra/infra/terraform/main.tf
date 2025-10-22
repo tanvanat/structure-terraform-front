@@ -94,7 +94,7 @@ resource "openstack_compute_instance_v2" "control_plane" {
     boot_index            = 0
     destination_type      = "volume"
     volume_size           = var.control_plane_volume_size
-    delete_on_termination = false
+    delete_on_termination = true
   }
 }
 
@@ -138,7 +138,7 @@ resource "openstack_compute_instance_v2" "worker_1_NON" {
     boot_index            = 0
     destination_type      = "volume"
     volume_size           = var.worker_volume_size
-    delete_on_termination = false
+    delete_on_termination = true
   }
 }
 
@@ -182,7 +182,7 @@ resource "openstack_compute_instance_v2" "worker_2_NON" {
     destination_type      = "volume"
     volume_size           = var.worker_volume_size
     volume_type           = var.volume_type_ssd
-    delete_on_termination = false
+    delete_on_termination = true
   }
 }
 
@@ -225,7 +225,7 @@ resource "openstack_compute_instance_v2" "argocd_non" {
     boot_index            = 0
     destination_type      = "volume"
     volume_size           = var.worker_volume_size
-    delete_on_termination = false
+    delete_on_termination = true
   }
 
   # ถ้ามี cloud-init user_data สำหรับติดตั้ง k0s + Argo CD ค่อยใส่ภายหลัง
@@ -271,7 +271,7 @@ resource "openstack_compute_instance_v2" "prod_non" {
     boot_index            = 0
     destination_type      = "volume"
     volume_size           = var.worker_volume_size
-    delete_on_termination = false
+    delete_on_termination = true
   }
 
   # ภายหลังสามารถใส่ cloud-init ติดตั้ง HAProxy + certbot/CF tunnel ได้
@@ -317,7 +317,7 @@ resource "openstack_compute_instance_v2" "control_plane_bkk" {
     boot_index            = 0
     destination_type      = "volume"
     volume_size           = var.control_plane_volume_size
-    delete_on_termination = false
+    delete_on_termination = true
   }
 }
 
@@ -360,7 +360,7 @@ resource "openstack_compute_instance_v2" "worker_1_bkk" {
     boot_index            = 0
     destination_type      = "volume"
     volume_size           = var.worker_volume_size
-    delete_on_termination = false
+    delete_on_termination = true
   }
 }
 
@@ -405,7 +405,7 @@ resource "openstack_compute_instance_v2" "worker_2_bkk" {
     volume_size      = var.worker_volume_size
     # ถ้าต้องการระบุชนิดดิสก์เหมือนตัว NON:
     # volume_type           = var.volume_type_ssd
-    delete_on_termination = false
+    delete_on_termination = true
   }
 }
 
