@@ -1,10 +1,25 @@
+########################################
+# Locals & Data
+########################################
+locals {
+  ssh_user         = var.ssh_user
+  private_key_path = var.private_key_path
+  cluster_cidr     = var.vpc_subnet_cidr
+}
 
-#ให้ใช้key-pair ที่มีอยู่แล้วเเทนที่จะสร้างใหม่
+# Existing keypair
 data "openstack_compute_keypair_v2" "keypair" {
   name = var.key_pair_name
 }
 
+# Reuse the EXISTING router by name and attach our subnet to it
+data "openstack_networking_router_v2" "router_non" {
+  name = "k0s-router-non"
+}
 
+########################################
+# Private Network (tenant VPC)
+########################################
 resource "openstack_networking_network_v2" "network" {
   name     = var.vpc_network_name
   external = false
@@ -18,76 +33,223 @@ resource "openstack_networking_subnet_v2" "subnet" {
   dns_nameservers = var.vpc_dns_nameservers
 }
 
-resource "openstack_networking_secgroup_v2" "secgroup_1" {
-  name        = var.security_group_name
-  description = "Security group for k0s cluster"
+# Attach the existing router to THIS subnet (critical for FIP/NAT)
+resource "openstack_networking_router_interface_v2" "router_non_if" {
+  router_id = data.openstack_networking_router_v2.router_non.id
+  subnet_id = openstack_networking_subnet_v2.subnet.id
 }
 
-# Rule สำหรับอนุญาตการเข้าถึง SSH จากทุก IP
-resource "openstack_networking_secgroup_rule_v2" "secgroup_rule_1" {
+########################################
+# Security Group (private-first)
+########################################
+resource "openstack_networking_secgroup_v2" "secgroup_1" {
+  name        = var.security_group_name
+  description = "Security group for k0s cluster (private-first)"
+}
+
+# ---- Core reachability rules ----
+
+# Allow ALL traffic between members of the SAME SG
+# (bastion/prod-non and all cluster nodes share this SG)
+resource "openstack_networking_secgroup_rule_v2" "intra_sg_all_v4" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+  remote_group_id   = openstack_networking_secgroup_v2.secgroup_1.id
+  # protocol intentionally omitted = allow any (TCP/UDP/ICMP)
+}
+
+# Egress allow all (so bastion can open outbound SSH to 10.0.0.0/24, pull packages, etc.)
+resource "openstack_networking_secgroup_rule_v2" "egress_all_v4" {
+  direction         = "egress"
+  ethertype         = "IPv4"
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+# ---- (Optional) keep the explicit, self-documenting k8s ports ----
+# SSH inside the private CIDR (bastion -> nodes)
+resource "openstack_networking_secgroup_rule_v2" "ssh_internal" {
   direction         = "ingress"
   ethertype         = "IPv4"
   protocol          = "tcp"
   port_range_min    = 22
   port_range_max    = 22
-  remote_ip_prefix  = "0.0.0.0/0"
+  remote_ip_prefix  = local.cluster_cidr
   security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
 }
 
-# Rule สำหรับ Kubernetes API eg.ให้worker nodeเข้าถึงkubernetes API server ที่รันอยู่ในcontrol plane 6443
-resource "openstack_networking_secgroup_rule_v2" "secgroup_rule_2" {
+# Kubernetes API
+resource "openstack_networking_secgroup_rule_v2" "k8s_api_internal" {
   direction         = "ingress"
   ethertype         = "IPv4"
   protocol          = "tcp"
   port_range_min    = 6443
   port_range_max    = 6443
-  remote_ip_prefix  = "0.0.0.0/0"
+  remote_ip_prefix  = local.cluster_cidr
   security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
 }
 
-#icmp
-resource "openstack_networking_secgroup_rule_v2" "secgroup_rule_icmp" {
+# Kubelet
+resource "openstack_networking_secgroup_rule_v2" "kubelet_internal" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 10250
+  port_range_max    = 10250
+  remote_ip_prefix  = local.cluster_cidr
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+# etcd
+resource "openstack_networking_secgroup_rule_v2" "etcd_internal" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 2379
+  port_range_max    = 2380
+  remote_ip_prefix  = local.cluster_cidr
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+# controller-manager / scheduler
+resource "openstack_networking_secgroup_rule_v2" "cm_sched_internal" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 10257
+  port_range_max    = 10259
+  remote_ip_prefix  = local.cluster_cidr
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+# NodePort (optional)
+resource "openstack_networking_secgroup_rule_v2" "nodeport_internal" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 30000
+  port_range_max    = 32767
+  remote_ip_prefix  = local.cluster_cidr
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+# ICMP inside
+resource "openstack_networking_secgroup_rule_v2" "icmp_internal" {
   direction         = "ingress"
   ethertype         = "IPv4"
   protocol          = "icmp"
+  remote_ip_prefix  = local.cluster_cidr
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+# Public HTTP/HTTPS to LB (Prod-NON)
+resource "openstack_networking_secgroup_rule_v2" "lb_http" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 80
+  port_range_max    = 80
+  remote_ip_prefix  = "0.0.0.0/0"
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+resource "openstack_networking_secgroup_rule_v2" "lb_https" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 443
+  port_range_max    = 443
   remote_ip_prefix  = "0.0.0.0/0"
   security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
 }
 
-#-----------------------
-# Master-NON
-#-----------------------
-resource "openstack_networking_port_v2" "port_control" {
+# SSH to Prod-NON from your current public IP (for initial bastion access)
+resource "openstack_networking_secgroup_rule_v2" "ssh_from_my_ip" {
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 22
+  port_range_max    = 22
+  remote_ip_prefix  = var.my_ip_cidr
+  security_group_id = openstack_networking_secgroup_v2.secgroup_1.id
+}
+
+########################################
+# Ports
+########################################
+# NON
+resource "openstack_networking_port_v2" "port_master_non" {
   name       = "port_master_NON"
   network_id = openstack_networking_network_v2.network.id
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+resource "openstack_networking_port_v2" "port_worker_1_non" {
+  name       = "port_worker_1_NON"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+resource "openstack_networking_port_v2" "port_worker_2_non" {
+  name       = "port_worker_2_NON"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+resource "openstack_networking_port_v2" "port_argocd_non" {
+  name       = "port_argocd_NON"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+resource "openstack_networking_port_v2" "port_prod_non" {
+  name       = "port_prod_NON"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
   security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
 }
 
-resource "openstack_networking_floatingip_v2" "floatip_control" {
+# BKK (same subnet for now)
+resource "openstack_networking_port_v2" "port_master_bkk" {
+  name       = "port_master_BKK"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+resource "openstack_networking_port_v2" "port_worker_1_bkk" {
+  name       = "port_worker_1_BKK"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+resource "openstack_networking_port_v2" "port_worker_2_bkk" {
+  name       = "port_worker_2_BKK"
+  network_id = openstack_networking_network_v2.network.id
+  fixed_ip { subnet_id = openstack_networking_subnet_v2.subnet.id }
+  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
+}
+
+########################################
+# Floating IP: ONLY Prod-NON (LB/Bastion)
+########################################
+resource "openstack_networking_floatingip_v2" "fip_prod_non" {
   pool = var.public_ip_pool_name_non
 }
 
-resource "openstack_networking_floatingip_associate_v2" "fip_control" {
-  floating_ip = openstack_networking_floatingip_v2.floatip_control.address
-  port_id     = openstack_networking_port_v2.port_control.id
+resource "openstack_networking_floatingip_associate_v2" "assoc_prod_non" {
+  floating_ip = openstack_networking_floatingip_v2.fip_prod_non.address
+  port_id     = openstack_networking_port_v2.port_prod_non.id
 }
 
-resource "openstack_compute_instance_v2" "control_plane" {
-  name = var.control_plane_name_non
-  # image_id          = var.os_image_id
-  flavor_name = var.control_plane_flavor
-  key_pair    = data.openstack_compute_keypair_v2.keypair.name
-
-  # security_groups   = ["default", "SSH", "ALL"]
+########################################
+# Instances
+########################################
+# NON
+resource "openstack_compute_instance_v2" "control_plane_non" {
+  name              = var.control_plane_name_non
+  flavor_name       = var.control_plane_flavor
+  key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_non
-
-  network {
-    port = openstack_networking_port_v2.port_control.id
-  }
-
+  network { port = openstack_networking_port_v2.port_master_non.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -98,40 +260,12 @@ resource "openstack_compute_instance_v2" "control_plane" {
   }
 }
 
-#-----------------------
-# Worker-1-NON
-#-----------------------
-resource "openstack_networking_port_v2" "port_worker_1_NON" {
-  name       = "port_worker_1_NON"
-  network_id = openstack_networking_network_v2.network.id
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "floatip_worker_1_NON" {
-  pool = var.public_ip_pool_name_non
-}
-
-resource "openstack_networking_floatingip_associate_v2" "fip_worker_1_NON" {
-  floating_ip = openstack_networking_floatingip_v2.floatip_worker_1_NON.address
-  port_id     = openstack_networking_port_v2.port_worker_1_NON.id
-}
-
-resource "openstack_compute_instance_v2" "worker_1_NON" {
-  name = var.worker_1_non_name
-  # image_id          = var.os_image_id
-  flavor_name = var.worker_flavor
-  key_pair    = data.openstack_compute_keypair_v2.keypair.name
-
-  # security_groups   = ["default", "SSH", "ALL"]
+resource "openstack_compute_instance_v2" "worker_1_non" {
+  name              = var.worker_1_non_name
+  flavor_name       = var.worker_flavor
+  key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_non
-
-  network {
-    port = openstack_networking_port_v2.port_worker_1_NON.id
-  }
-
+  network { port = openstack_networking_port_v2.port_worker_1_non.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -142,39 +276,12 @@ resource "openstack_compute_instance_v2" "worker_1_NON" {
   }
 }
 
-#-----------------------
-# Worker-2-NON
-#-----------------------
-resource "openstack_networking_port_v2" "port_worker_2_NON" {
-  name       = "port_worker_2_NON"
-  network_id = openstack_networking_network_v2.network.id
-
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "floatip_worker_2_NON" {
-  pool = var.public_ip_pool_name_non
-}
-
-resource "openstack_networking_floatingip_associate_v2" "fip_worker_2_NON" {
-  floating_ip = openstack_networking_floatingip_v2.floatip_worker_2_NON.address
-  port_id     = openstack_networking_port_v2.port_worker_2_NON.id
-}
-
-resource "openstack_compute_instance_v2" "worker_2_NON" {
+resource "openstack_compute_instance_v2" "worker_2_non" {
   name              = var.worker_2_non_name
   flavor_name       = var.worker_flavor
   key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_non
-
-  network {
-    port = openstack_networking_port_v2.port_worker_2_NON.id
-  }
-
+  network { port = openstack_networking_port_v2.port_worker_2_non.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -186,39 +293,12 @@ resource "openstack_compute_instance_v2" "worker_2_NON" {
   }
 }
 
-# -----------------------
-# 2.4) Argo CD - NON (Single node)
-# -----------------------
-resource "openstack_networking_port_v2" "port_argocd_non" {
-  name       = "port_argocd_NON"
-  network_id = openstack_networking_network_v2.network.id
-
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "fip_argocd_non" {
-  pool = var.public_ip_pool_name_non
-}
-
-resource "openstack_networking_floatingip_associate_v2" "assoc_argocd_non" {
-  floating_ip = openstack_networking_floatingip_v2.fip_argocd_non.address
-  port_id     = openstack_networking_port_v2.port_argocd_non.id
-}
-
 resource "openstack_compute_instance_v2" "argocd_non" {
   name              = var.argocd_non_name
   flavor_name       = var.worker_flavor
   key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_non
-
-  network {
-    port = openstack_networking_port_v2.port_argocd_non.id
-  }
-
+  network { port = openstack_networking_port_v2.port_argocd_non.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -227,32 +307,6 @@ resource "openstack_compute_instance_v2" "argocd_non" {
     volume_size           = var.worker_volume_size
     delete_on_termination = true
   }
-
-  # ถ้ามี cloud-init user_data สำหรับติดตั้ง k0s + Argo CD ค่อยใส่ภายหลัง
-  # user_data = file("${path.module}/cloudinit/argocd.yaml")
-}
-
-# -----------------------
-# 2.5) Prod - NON (Single node with HAProxy)
-# -----------------------
-resource "openstack_networking_port_v2" "port_prod_non" {
-  name       = "port_prod_NON"
-  network_id = openstack_networking_network_v2.network.id
-
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "fip_prod_non" {
-  pool = var.public_ip_pool_name_non
-}
-
-resource "openstack_networking_floatingip_associate_v2" "assoc_prod_non" {
-  floating_ip = openstack_networking_floatingip_v2.fip_prod_non.address
-  port_id     = openstack_networking_port_v2.port_prod_non.id
 }
 
 resource "openstack_compute_instance_v2" "prod_non" {
@@ -260,11 +314,7 @@ resource "openstack_compute_instance_v2" "prod_non" {
   flavor_name       = var.worker_flavor
   key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_non
-
-  network {
-    port = openstack_networking_port_v2.port_prod_non.id
-  }
-
+  network { port = openstack_networking_port_v2.port_prod_non.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -273,44 +323,15 @@ resource "openstack_compute_instance_v2" "prod_non" {
     volume_size           = var.worker_volume_size
     delete_on_termination = true
   }
-
-  # ภายหลังสามารถใส่ cloud-init ติดตั้ง HAProxy + certbot/CF tunnel ได้
-  # user_data = file("${path.module}/cloudinit/prod-haproxy.yaml")
 }
 
-# -----------------------
-# Master-BKK (Control Plane)
-# -----------------------
-resource "openstack_networking_port_v2" "port_master_bkk" {
-  name       = "port_master_BKK"
-  network_id = openstack_networking_network_v2.network.id
-
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "fip_master_bkk" {
-  pool = var.public_ip_pool_name_bkk
-}
-
-resource "openstack_networking_floatingip_associate_v2" "assoc_master_bkk" {
-  floating_ip = openstack_networking_floatingip_v2.fip_master_bkk.address
-  port_id     = openstack_networking_port_v2.port_master_bkk.id
-}
-
+# BKK
 resource "openstack_compute_instance_v2" "control_plane_bkk" {
   name              = var.control_plane_name_bkk
   flavor_name       = var.control_plane_flavor
   key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_bkk
-
-  network {
-    port = openstack_networking_port_v2.port_master_bkk.id
-  }
-
+  network { port = openstack_networking_port_v2.port_master_bkk.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -321,39 +342,12 @@ resource "openstack_compute_instance_v2" "control_plane_bkk" {
   }
 }
 
-# -----------------------
-# Worker-1-BKK
-# -----------------------
-resource "openstack_networking_port_v2" "port_worker_1_bkk" {
-  name       = "port_worker_1_BKK"
-  network_id = openstack_networking_network_v2.network.id
-
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "fip_worker_1_bkk" {
-  pool = var.public_ip_pool_name_bkk
-}
-
-resource "openstack_networking_floatingip_associate_v2" "assoc_worker_1_bkk" {
-  floating_ip = openstack_networking_floatingip_v2.fip_worker_1_bkk.address
-  port_id     = openstack_networking_port_v2.port_worker_1_bkk.id
-}
-
 resource "openstack_compute_instance_v2" "worker_1_bkk" {
   name              = var.worker_1_bkk_name
   flavor_name       = var.worker_flavor
   key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_bkk
-
-  network {
-    port = openstack_networking_port_v2.port_worker_1_bkk.id
-  }
-
+  network { port = openstack_networking_port_v2.port_worker_1_bkk.id }
   block_device {
     uuid                  = var.os_image_id
     source_type           = "image"
@@ -364,80 +358,96 @@ resource "openstack_compute_instance_v2" "worker_1_bkk" {
   }
 }
 
-# -----------------------
-# Worker-2-BKK
-# -----------------------
-resource "openstack_networking_port_v2" "port_worker_2_bkk" {
-  name       = "port_worker_2_BKK"
-  network_id = openstack_networking_network_v2.network.id
-
-  fixed_ip {
-    subnet_id = openstack_networking_subnet_v2.subnet.id
-  }
-
-  security_group_ids = [openstack_networking_secgroup_v2.secgroup_1.id]
-}
-
-resource "openstack_networking_floatingip_v2" "fip_worker_2_bkk" {
-  pool = var.public_ip_pool_name_bkk
-}
-
-resource "openstack_networking_floatingip_associate_v2" "assoc_worker_2_bkk" {
-  floating_ip = openstack_networking_floatingip_v2.fip_worker_2_bkk.address
-  port_id     = openstack_networking_port_v2.port_worker_2_bkk.id
-}
-
 resource "openstack_compute_instance_v2" "worker_2_bkk" {
   name              = var.worker_2_bkk_name
   flavor_name       = var.worker_flavor
   key_pair          = data.openstack_compute_keypair_v2.keypair.name
   availability_zone = var.availability_zone_bkk
-
-  network {
-    port = openstack_networking_port_v2.port_worker_2_bkk.id
-  }
-
+  network { port = openstack_networking_port_v2.port_worker_2_bkk.id }
   block_device {
-    uuid             = var.os_image_id
-    source_type      = "image"
-    boot_index       = 0
-    destination_type = "volume"
-    volume_size      = var.worker_volume_size
-    # ถ้าต้องการระบุชนิดดิสก์เหมือนตัว NON:
-    # volume_type           = var.volume_type_ssd
+    uuid                  = var.os_image_id
+    source_type           = "image"
+    boot_index            = 0
+    destination_type      = "volume"
+    volume_size           = var.worker_volume_size
     delete_on_termination = true
   }
 }
 
+########################################
+# ssh_config for Ansible (uses Prod-NON FIP)
+########################################
+resource "local_file" "ssh_config" {
+  filename = "${path.module}/ssh_config"
+  content = <<-EOT
+  Host prod-non
+    HostName ${openstack_networking_floatingip_v2.fip_prod_non.address}
+    User ubuntu
+    IdentityFile ~/.ssh/Fronttest.pem
+    IdentitiesOnly yes
+    ForwardAgent yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile=/dev/null
+    PreferredAuthentications publickey
+    ConnectTimeout 10
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
 
+  # Any RFC1918 targets go via bastion
+  Host 10.* 192.168.* 172.16.* 172.17.* 172.18.* 172.19.* 172.2[0-9].* 172.3[0-1].*
+    User ubuntu
+    ProxyJump prod-non
+    ForwardAgent yes
+    IdentitiesOnly yes
+    StrictHostKeyChecking no
+    UserKnownHostsFile=/dev/null
+    PreferredAuthentications publickey
+    ConnectTimeout 10
+    ServerAliveInterval 30
+    ServerAliveCountMax 3
+
+  # Safety default so Ansible never falls back to passwords and hangs
+  Host *
+    BatchMode yes
+    IdentitiesOnly yes
+  EOT
+}
+
+########################################
+# Run Ansible after files are written
+########################################
+resource "null_resource" "run_ansible" {
+  depends_on = [local_file.ssh_config]
+
+  triggers = {
+    ssh_sha  = sha1(local_file.ssh_config.content)
+    site_sha = filesha1("${path.module}/../ansible/site.yaml")
+    inv_sha  = filesha1("${path.module}/../ansible/inventory.ini")
+  }
+
+  provisioner "local-exec" {
+    working_dir = path.module
+    command     = "ANSIBLE_SSH_ARGS='-F ${path.module}/ssh_config' SSH_AUTH_SOCK=$SSH_AUTH_SOCK ansible-playbook -i ${path.module}/../ansible/inventory.ini ${path.module}/../ansible/site.yaml"
+  }
+}
+
+########################################
 # Outputs
-output "master_NON_public_ip" {
-  value = openstack_networking_floatingip_v2.floatip_control.address
+########################################
+output "cluster_private_ips" {
+  value = {
+    master_bkk  = openstack_networking_port_v2.port_master_bkk.all_fixed_ips[0]
+    worker1_bkk = openstack_networking_port_v2.port_worker_1_bkk.all_fixed_ips[0]
+    worker2_bkk = openstack_networking_port_v2.port_worker_2_bkk.all_fixed_ips[0]
+    master_non  = openstack_networking_port_v2.port_master_non.all_fixed_ips[0]
+    worker1_non = openstack_networking_port_v2.port_worker_1_non.all_fixed_ips[0]
+    worker2_non = openstack_networking_port_v2.port_worker_2_non.all_fixed_ips[0]
+    argocd_non  = openstack_networking_port_v2.port_argocd_non.all_fixed_ips[0]
+    prod_non    = openstack_networking_port_v2.port_prod_non.all_fixed_ips[0]
+  }
 }
 
-output "worker_1_NON_public_ip" {
-  value = openstack_networking_floatingip_v2.floatip_worker_1_NON.address
-}
-
-output "worker_2_NON_public_ip" {
-  value = openstack_networking_floatingip_v2.floatip_worker_2_NON.address
-}
-
-output "argocd_NON_public_ip" {
-  value = openstack_networking_floatingip_v2.fip_argocd_non.address
-}
-
+# Only one public IP: Prod-NON (bastion + HAProxy)
 output "prod_NON_public_ip" {
   value = openstack_networking_floatingip_v2.fip_prod_non.address
-}
-
-
-output "master_BKK_public_ip" {
-  value = openstack_networking_floatingip_v2.fip_master_bkk.address
-}
-output "worker_1_BKK_public_ip" {
-  value = openstack_networking_floatingip_v2.fip_worker_1_bkk.address
-}
-output "worker_2_BKK_public_ip" {
-  value = openstack_networking_floatingip_v2.fip_worker_2_bkk.address
 }

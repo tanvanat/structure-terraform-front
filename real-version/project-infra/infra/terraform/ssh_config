@@ -1,0 +1,36 @@
+# === Bastion ===
+Host prod-non
+  HostName 10.112.2.65
+  User ubuntu
+  IdentityFile /home/tanvanat/.ssh/Fronttest.pem
+  IdentitiesOnly yes
+  BatchMode yes
+  PubkeyAuthentication yes
+  PasswordAuthentication no
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  ConnectTimeout 10
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+
+# === RFC1918 targets via bastion ===
+Host 10.* 192.168.* 172.16.* 172.17.* 172.18.* 172.19.* 172.2[0-9].* 172.3[0-1].*
+  User ubuntu
+  IdentityFile /home/tanvanat/.ssh/Fronttest.pem
+  IdentitiesOnly yes
+  BatchMode yes
+  PubkeyAuthentication yes
+  PasswordAuthentication no
+  ProxyJump prod-non
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  ConnectTimeout 10
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+
+# Safety default
+Host *
+  BatchMode yes
+  IdentitiesOnly yes
+  PubkeyAuthentication yes
+  PasswordAuthentication no
