@@ -1,0 +1,78 @@
+---
+# site.yaml — ตัวอย่าง Playbook เพื่อเตรียมระบบแบบเบาๆ
+# แนะนำให้รันจากเครื่องในวงเดียวกัน หรือใช้ ProxyJump ผ่าน ssh_config ที่ Terraform สร้าง
+
+- name: Common prep on all nodes
+  hosts: all_nodes
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Ensure apt cache up to date (Ubuntu/Debian-like)
+      ansible.builtin.apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure python3 exists (สำหรับบาง image)
+      ansible.builtin.package:
+        name: python3
+        state: present
+
+    - name: Basic tools
+      ansible.builtin.package:
+        name:
+          - curl
+          - git
+          - tmux
+          - net-tools
+        state: present
+
+- name: Install/prepare control plane (k0s)
+  hosts: master_bkk, master_non
+  become: true
+  tasks:
+    - name: Download k0s (example; pin เวอร์ชันตามต้องการ)
+      ansible.builtin.shell: |
+        curl -sSLf https://get.k0s.sh | sudo sh
+      args:
+        warn: false
+
+    # TODO: init cluster, copy kubeconfig, ฯลฯ (ขึ้นกับสถาปัตยกรรมที่คุณวาง)
+    - name: Placeholder - initialize k0s control-plane
+      ansible.builtin.debug:
+        msg: "TODO: k0s control-plane init here"
+
+- name: Install/prepare workers (k0s)
+  hosts: workers_bkk, workers_non
+  become: true
+  tasks:
+    - name: Ensure k0s installed
+      ansible.builtin.shell: |
+        curl -sSLf https://get.k0s.sh | sudo sh
+      args:
+        warn: false
+
+    # TODO: join token/command จาก control-plane
+    - name: Placeholder - join worker to cluster
+      ansible.builtin.debug:
+        msg: "TODO: k0s worker join here (use token from control-plane)"
+
+- name: Install ArgoCD on NON single node
+  hosts: argocd
+  become: true
+  tasks:
+    - name: Placeholder - install Argo CD
+      ansible.builtin.debug:
+        msg: "TODO: install Argo CD (via Helm/manifest) on argocd-non"
+
+- name: Install HAProxy (LB) on Prod-NON
+  hosts: lb
+  become: true
+  tasks:
+    - name: Install haproxy
+      ansible.builtin.package:
+        name: haproxy
+        state: present
+
+    - name: Placeholder - configure haproxy for k8s services
+      ansible.builtin.debug:
+        msg: "TODO: write /etc/haproxy/haproxy.cfg for 80/443 -> cluster backends, then restart"
