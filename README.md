@@ -1,1 +1,1 @@
-ทดลองการสร้างinstanceจากterraformเอง
+# Create Instances Using Terraform on OpenStack
